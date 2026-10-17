@@ -2160,3 +2160,273 @@ The one-decision-per-incident map is in-memory and resets on agent restart.
 If the agent restarted between two approvals, a second approval can get through.
 This is a known limitation of the in-memory approach. A persistent store
 (MongoDB or Redis) will be added in a later step.
+
+---
+
+## Step 10: Deploy to AWS EC2 with Terraform
+
+Runs the core application (mongo, backend, frontend) on a single EC2
+instance. Terraform provisions the instance; the instance itself clones
+this repo from GitHub and builds/runs it with `docker compose` on first
+boot. A GitHub Actions job then redeploys it automatically on every push
+to `main`.
+
+### Architecture
+
+```
+ you (local machine)                 AWS                      GitHub
+┌──────────────────┐          ┌───────────────────┐     ┌─────────────────┐
+│ AWS CLI           │  create  │ EC2 instance        │     │ Actions: CI      │
+│ Terraform          ├─────────►│  (Amazon Linux 2023)│     │  build + push    │
+│ (terraform/ec2/)   │ security │  - Docker            │     │  images to GHCR  │
+│                    │  group   │  - git clone repo ───┼─────┤ Actions: CD      │
+└──────────────────┘  + key    │  - docker compose up │◄────┤  SSH in, git pull,│
+                       pair     └───────────────────┘ SSH   │  rebuild          │
+                                                              └─────────────────┘
+```
+
+Nothing in the EC2 instance pulls pre-built images from GHCR for this
+path — it builds from source on the box itself, using whatever is on the
+`main` branch at boot time (initial provisioning) or at each push
+(ongoing, via the `deploy` job).
+
+### What gets installed, and where
+
+**On your own machine** (to run Terraform and manage the instance):
+
+| Tool | Minimum version | Install (Windows, winget) | Install guide |
+|---|---|---|---|
+| AWS CLI | v2 | `winget install Amazon.AWSCLI` | https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html |
+| Terraform | >= 1.8.0 | `winget install Hashicorp.Terraform` | https://developer.hashicorp.com/terraform/install |
+| Git | any recent | `winget install Git.Git` | https://git-scm.com/downloads |
+| GitHub CLI (optional, for secrets) | any recent | `winget install GitHub.cli` | https://cli.github.com/ |
+
+macOS/Linux: use `brew install awscli terraform git gh` or your distro's
+package manager instead of winget.
+
+**On the EC2 instance** — all installed automatically by
+`terraform/ec2/user_data.sh.tpl` the first time it boots. You do not run
+these yourself; they're listed here so it's clear what the instance ends
+up with:
+
+| Package | Purpose |
+|---|---|
+| `docker` (dnf package) | Runs the containers |
+| Docker Compose v2 plugin (`docker-compose-linux-x86_64` binary) | `docker compose` subcommand |
+| `git` (dnf package) | Clones this repo onto the instance |
+| 1GB swap file at `/swapfile` | Prevents the frontend's `npm`/`vite` build from OOM-killing on a 1GB-RAM `t3.micro` |
+
+Everything the *application* needs (Node 20, npm packages, Go toolchain
+for other services) lives inside the Docker images themselves, built from
+the Dockerfiles in `backend/` and `frontend/` — none of that is installed
+on the host OS.
+
+### Directory layout (Step 10 additions)
+
+```
+terraform/
+  ec2/
+    versions.tf                 Provider requirements (aws, tls)
+    variables.tf                aws_region, instance_type, allowed_ssh_cidr,
+                                 github_repo_url, mongo_root_username/password
+    main.tf                     Key pair, security group, EC2 instance
+    outputs.tf                  public_ip, ssh_private_key (sensitive), ssh_command
+    user_data.sh.tpl            Boot script: installs Docker, clones repo, runs it
+    terraform.tfvars.example    Copy to terraform.tfvars (gitignored) and fill in
+    README.md                   Full command reference for this module
+deploy/
+  iam-policy-ec2-deploy.json   Least-privilege IAM policy for the deploying user
+  README.md                    IAM user setup (one-time, console-only step)
+```
+
+### Setup
+
+#### 1. Create a least-privilege IAM user (one-time, AWS Console)
+
+Full console steps are in `deploy/README.md` section 1. Summary: create a
+user, attach a custom policy made from `deploy/iam-policy-ec2-deploy.json`
+(EC2 instance/security-group/key-pair actions only, no broad admin access),
+then create an access key for it.
+
+#### 2. Configure the AWS CLI
+
+```bash
+aws configure
+# AWS Access Key ID:     <from step 1>
+# AWS Secret Access Key: <from step 1>
+# Default region name:   us-east-1
+# Default output format: json
+```
+
+Verify:
+
+```bash
+aws sts get-caller-identity
+```
+
+#### 3. Make sure your GitHub repo is public
+
+The instance clones over plain HTTPS with no credentials. If you need a
+private repo instead, see the note in `terraform/ec2/README.md`
+prerequisites about passing a deploy token.
+
+#### 4. Configure Terraform variables
+
+```bash
+cd terraform/ec2
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars` (this file is gitignored — it never reaches git):
+
+| Variable | What to set |
+|---|---|
+| `allowed_ssh_cidr` | Your IP + `/32`. Get it with `curl -s https://checkip.amazonaws.com` |
+| `github_repo_url` | `https://github.com/<you>/<your-repo>.git` |
+| `instance_type` | `t3.micro` unless your account allows larger Free Tier types — AWS rejects non-Free-Tier types on some accounts with `InvalidParameterCombination` |
+| `mongo_root_password` | Generate with `openssl rand -hex 24` — **use hex, not base64**; a `/` or `+` in a base64 password breaks the raw MongoDB connection string this project builds |
+
+#### 5. Apply
+
+```bash
+terraform init
+terraform plan     # review: should show 4 resources to add
+terraform apply    # type "yes"
+```
+
+This creates a billable AWS resource. Review the plan before confirming.
+
+#### 6. Watch the first boot
+
+```bash
+PUBLIC_IP=$(terraform output -raw public_ip)
+terraform output -raw ssh_private_key > sentinel-deploy-key.pem
+chmod 400 sentinel-deploy-key.pem   # Windows: icacls sentinel-deploy-key.pem /inheritance:r /grant:r "%USERNAME%:R"
+
+# Wait ~10-20s for SSH, then tail the boot log:
+ssh -i sentinel-deploy-key.pem ec2-user@$PUBLIC_IP "tail -f /var/log/cloud-init-output.log"
+# Ctrl-C once you see "Container devops-sentinel-frontend-1  Started"
+```
+
+First boot takes 3-5 minutes: `dnf update` and Docker install (~1-2 min),
+then `git clone` and `docker compose up --build` (image builds, ~1-2 min).
+
+#### 7. Verify
+
+```bash
+curl -s http://$PUBLIC_IP/health
+curl -s -X POST http://$PUBLIC_IP/api/items -H "Content-Type: application/json" -d '{"title":"hello from ec2"}'
+curl -s http://$PUBLIC_IP/api/items
+```
+
+#### 8. Wire up automatic deploy-on-push (CD)
+
+```bash
+cd ../..   # repo root
+gh secret set EC2_HOST --body "$(cd terraform/ec2 && terraform output -raw public_ip)"
+gh secret set EC2_USER --body "ec2-user"
+gh secret set EC2_SSH_KEY < terraform/ec2/sentinel-deploy-key.pem
+```
+
+Then, one manual step in the GitHub web UI (this is a repo security
+setting and can't be scripted around): go to **Settings → Actions →
+General → Workflow permissions** and select **"Read and write
+permissions"**. Without this, the CI job's push to GHCR fails with a
+permissions error, and the `deploy` job never runs.
+
+From here, every push to `main` that passes CI automatically runs
+`git fetch && git reset --hard origin/main && docker compose up -d --build`
+on the instance (see the `deploy` job in `.github/workflows/ci.yml`).
+
+### Verification checklist
+
+```bash
+# Instance is running
+aws ec2 describe-instances --instance-ids "$(cd terraform/ec2 && terraform output -raw instance_id)" \
+  --query 'Reservations[0].Instances[0].State.Name' --output text
+# Expected: running
+
+# App responds
+curl -s http://$PUBLIC_IP/health
+# Expected: {"status":"ok","db":"connected",...}
+
+# CD secrets exist (requires gh CLI)
+gh secret list
+# Expected: EC2_HOST, EC2_USER, EC2_SSH_KEY present
+
+# Latest pipeline run succeeded
+gh run list --limit 1
+```
+
+### Updating the instance's own configuration
+
+Changing `mongo_root_password`, `instance_type`, or `github_repo_url` in
+`terraform.tfvars` and re-running `terraform apply` **replaces the
+instance** (`user_data_replace_on_change = true`), which wipes the Mongo
+data volume since it's a fresh instance. For routine code updates, don't
+touch Terraform — let the CD pipeline (step 8 above) or a manual
+`ssh ... "cd /opt/devops-sentinel && git pull && docker compose up -d --build"`
+handle it; that updates the code in place without losing data.
+
+### Rollback / cleanup
+
+```bash
+# Stop the app, keep the instance
+ssh -i terraform/ec2/sentinel-deploy-key.pem ec2-user@$PUBLIC_IP \
+  "cd /opt/devops-sentinel && docker compose down"
+
+# Destroy everything Terraform created (instance, key pair, security group)
+cd terraform/ec2 && terraform destroy
+```
+
+### Troubleshooting
+
+**`terraform apply` fails with `InvalidParameterCombination: The specified
+instance type is not eligible for Free Tier`**
+
+Your AWS account has Free Tier restrictions enforced. Set `instance_type`
+to `t3.micro` (or `t2.micro`) in `terraform.tfvars` and re-apply.
+
+**Boot log shows `No space left on device` during `dnf update` or the
+Docker build**
+
+The default root volume is too small for OS updates plus image builds.
+`terraform/ec2/main.tf` already sets `root_block_device { volume_size = 24 }`
+— if you lowered it, raise it back and run
+`terraform apply -replace="aws_instance.app"` to get a clean instance
+rather than resizing in place (resizing the EBS volume alone doesn't grow
+the filesystem on an already-booted instance).
+
+**Backend container logs show `"error":"Password contains unescaped
+characters"`**
+
+Your `mongo_root_password` contains a character (`/`, `+`, `@`, `:`, `%`)
+that isn't valid unescaped in a MongoDB connection URI, which this project
+builds by directly interpolating the password. Regenerate with
+`openssl rand -hex 24` (hex only, no special characters) and re-apply.
+
+**Docker build fails with `apk add --no-cache curl=<version>` exit code 1**
+
+An Alpine-based Dockerfile pinned an exact package version that has since
+aged out of Alpine's repository index. Edit the Dockerfile to drop the
+version pin (`apk add --no-cache curl`) and push the fix — the instance
+(or the CD pipeline) will pick it up on the next build.
+
+**CI build job fails pushing to GHCR, `deploy` job shows "skipped"**
+
+The repository's default `GITHUB_TOKEN` permissions are read-only. Fix it
+in **Settings → Actions → General → Workflow permissions → "Read and
+write permissions"**, then re-run the failed jobs from the Actions tab
+(or `gh run rerun --failed`).
+
+**GitHub push is rejected with `GH013: Repository rule violations ...
+Push cannot contain secrets`**
+
+Secret scanning matched a pattern in a file being pushed — often a
+`.env.example` placeholder that looks structurally like a real token
+(e.g. `https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX`).
+Check the flagged file; if it's genuinely just a placeholder, replace it
+with text that can't match a real secret's shape (e.g.
+`REPLACE_WITH_YOUR_SLACK_INCOMING_WEBHOOK_URL`) rather than asking GitHub
+to allow it, so future pushes don't hit the same block. If it's an actual
+credential, remove it from history before pushing and rotate it.
