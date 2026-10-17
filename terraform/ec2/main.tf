@@ -75,6 +75,14 @@ resource "aws_instance" "app" {
   key_name               = aws_key_pair.deploy.key_name
   vpc_security_group_ids = [aws_security_group.app.id]
 
+  # Default AL2023 root volume (8GB) is not enough: OS updates + Docker +
+  # npm/go build layers routinely exceed it, failing the build mid-way
+  # with "No space left on device". 24GB comfortably covers it.
+  root_block_device {
+    volume_size = 24
+    volume_type = "gp3"
+  }
+
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
     github_repo_url      = var.github_repo_url
     mongo_root_username  = var.mongo_root_username

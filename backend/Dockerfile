@@ -18,7 +18,7 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM node:20.14.0-alpine3.19 AS runtime
 
 # Add curl for the health check command.
-RUN apk add --no-cache curl=8.8.0-r0
+RUN apk add --no-cache curl
 
 WORKDIR /app
 
