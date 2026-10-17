@@ -2338,6 +2338,173 @@ From here, every push to `main` that passes CI automatically runs
 `git fetch && git reset --hard origin/main && docker compose up -d --build`
 on the instance (see the `deploy` job in `.github/workflows/ci.yml`).
 
+### Manual walkthrough (without Terraform)
+
+Everything in steps 5-6 above happens automatically via
+`terraform/ec2/user_data.sh.tpl`. If you'd rather launch the instance by
+hand — to understand each step, to use the AWS Console instead of the
+CLI, or because you don't want to use Terraform at all — here is the
+exact equivalent, one command at a time. Steps 1-2 (IAM user, AWS CLI
+config) are the same as above; start from step 3.
+
+#### 1. Launch the instance (AWS Console)
+
+1. Sign in to the [AWS Console](https://console.aws.amazon.com) → **EC2** → **Launch instance**.
+2. **Name**: `devops-sentinel`.
+3. **Application and OS Images**: search "Amazon Linux" → select **Amazon Linux 2023 AMI** (free tier eligible, marked).
+4. **Instance type**: `t3.micro` (or `t2.micro`) — must say "Free tier eligible" unless you know your account allows larger types.
+5. **Key pair**: click **Create new key pair** → name it `sentinel-manual-key` → type RSA, format `.pem` → **Create key pair** (this downloads the `.pem` file to your machine — move it somewhere safe, e.g. next to this repo).
+6. **Network settings**: click **Edit** →
+   - Create a new security group named `devops-sentinel-manual-sg`.
+   - Add a rule: **Type** = SSH, **Source** = "My IP" (not Anywhere).
+   - Add another rule: **Type** = HTTP, **Source** = Anywhere (0.0.0.0/0).
+7. **Configure storage**: change the default **8 GiB** to **24 GiB** gp3. (The default is too small — see Troubleshooting below for what happens if you skip this.)
+8. Click **Launch instance**. Wait about a minute, then find its **Public IPv4 address** on the instance's detail page.
+
+Equivalent AWS CLI version of the same launch, if you prefer a terminal to the console:
+
+```bash
+aws ec2 create-key-pair --key-name sentinel-manual-key \
+  --query 'KeyMaterial' --output text > sentinel-manual-key.pem
+chmod 400 sentinel-manual-key.pem
+
+VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
+SG_ID=$(aws ec2 create-security-group --group-name devops-sentinel-manual-sg \
+  --description "manual EC2 setup" --vpc-id "$VPC_ID" --query 'GroupId' --output text)
+
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "${MY_IP}/32"
+aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0
+
+AMI_ID=$(aws ec2 describe-images --owners amazon \
+  --filters "Name=name,Values=al2023-ami-*-x86_64" "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text)
+
+aws ec2 run-instances --image-id "$AMI_ID" --instance-type t3.micro \
+  --key-name sentinel-manual-key --security-group-ids "$SG_ID" \
+  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":24,"VolumeType":"gp3"}}]' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=devops-sentinel}]'
+
+PUBLIC_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=devops-sentinel" \
+  "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+echo "$PUBLIC_IP"
+```
+
+#### 2. Connect
+
+```bash
+ssh -i sentinel-manual-key.pem ec2-user@$PUBLIC_IP
+```
+
+Everything from here runs **on the instance**, over this SSH session.
+
+#### 3. Update the OS and install packages
+
+```bash
+sudo dnf update -y
+sudo dnf install -y docker git
+```
+
+#### 4. Start Docker and let your user run it without `sudo`
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker ec2-user
+```
+
+Log out and back in for the group membership to take effect:
+
+```bash
+exit
+ssh -i sentinel-manual-key.pem ec2-user@$PUBLIC_IP
+```
+
+#### 5. Install the Docker Compose v2 plugin
+
+Amazon Linux's `docker` package does not bundle the `compose` subcommand —
+install the plugin separately:
+
+```bash
+mkdir -p ~/.docker/cli-plugins
+curl -SL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+  -o ~/.docker/cli-plugins/docker-compose
+chmod +x ~/.docker/cli-plugins/docker-compose
+```
+
+#### 6. Verify each tool installed correctly
+
+```bash
+docker --version          # Docker version 25.x...
+docker compose version    # Docker Compose version v2.29.7
+git --version             # git version 2.x...
+```
+
+If `docker compose version` says "command not found," re-check step 5 —
+it's a common miss since the plugin isn't in the base package.
+
+#### 7. (Optional) add swap space
+
+Skip this if you chose `t3.small` or larger. On `t3.micro` (1GB RAM), the
+frontend's `npm`/`vite` build step can get OOM-killed without it:
+
+```bash
+sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+#### 8. Clone the repository
+
+```bash
+git clone https://github.com/<your-username>/<your-repo>.git /opt/devops-sentinel 2>/dev/null \
+  || git clone https://github.com/<your-username>/<your-repo>.git ~/devops-sentinel
+cd ~/devops-sentinel   # or /opt/devops-sentinel if that worked (needs sudo to write there)
+```
+
+Using `/opt/devops-sentinel` matches the path the CD pipeline's `deploy`
+job expects (`cd /opt/devops-sentinel` in `.github/workflows/ci.yml`) — if
+you clone somewhere else, update that path in the workflow to match, or
+the automated `deploy` job won't find the code on future pushes.
+
+#### 9. Create the production `.env` file
+
+The repo's `.env` is gitignored on purpose (see `docs/env.md`) — it never
+comes from git. Create it directly on the server:
+
+```bash
+cat > .env <<'EOF'
+MONGO_INITDB_ROOT_USERNAME=admin
+MONGO_INITDB_ROOT_PASSWORD=REPLACE_WITH_A_STRONG_HEX_PASSWORD
+EOF
+```
+
+Generate the password value with `openssl rand -hex 24` (hex only — see
+the Troubleshooting entry below on why a `/` or `+` breaks this).
+
+#### 10. Build and start the stack
+
+```bash
+docker compose up -d --build
+```
+
+This reads the `docker-compose.yml` you just cloned, builds the backend
+and frontend images from their Dockerfiles, and starts mongo, backend,
+and frontend in dependency order.
+
+#### 11. Verify
+
+```bash
+curl -s http://localhost/health
+# from your own machine instead: curl -s http://$PUBLIC_IP/health
+```
+
+From here, the **Verification checklist**, **Rollback / cleanup**, and
+**Troubleshooting** sections below apply the same way regardless of
+whether you provisioned the instance with Terraform or by hand.
+
 ### Verification checklist
 
 ```bash
