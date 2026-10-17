@@ -1,0 +1,31 @@
+{
+  "name": "devops-sentinel-backend",
+  "version": "1.0.0",
+  "description": "DevOps Sentinel backend API",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "lint": "eslint src/**/*.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "express": "4.19.2",
+    "mongoose": "8.4.1",
+    "dotenv": "16.4.5",
+    "@opentelemetry/sdk-node": "0.52.1",
+    "@opentelemetry/auto-instrumentations-node": "0.47.1",
+    "@opentelemetry/exporter-trace-otlp-grpc": "0.52.1",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "0.52.1",
+    "@opentelemetry/sdk-metrics": "1.25.1",
+    "@opentelemetry/resources": "1.25.1",
+    "@opentelemetry/semantic-conventions": "1.25.1",
+    "@opentelemetry/api": "1.9.0"
+  },
+  "devDependencies": {
+    "eslint": "9.5.0"
+  }
+}

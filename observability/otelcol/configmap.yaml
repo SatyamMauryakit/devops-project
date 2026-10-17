@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: otelcol
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  config.yaml: |
+    # OpenTelemetry Collector configuration.
+    #
+    # Pipeline:
+    #   Traces:  OTLP (gRPC) in  -->  Tempo (OTLP gRPC) out
+    #   Metrics: OTLP (gRPC) in  -->  Prometheus exposition endpoint out
+    #   Logs:    OTLP (gRPC) in  -->  Loki (HTTP) out
+
+    extensions:
+      # health_check exposes GET / on :13133 so the Kubernetes liveness
+      # and readiness probes have a real endpoint to call.
+      health_check:
+        endpoint: "0.0.0.0:13133"
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+
+    processors:
+      # batch groups spans/metrics/logs before exporting to reduce egress calls.
+      batch:
+        send_batch_size: 512
+        timeout: 5s
+
+      # memory_limiter prevents the collector from OOM-killing itself under load.
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 200
+        spike_limit_mib: 50
+
+    exporters:
+      # Traces -> Tempo
+      otlp/tempo:
+        endpoint: "tempo:4317"
+        tls:
+          insecure: true
+
+      # Metrics -> exposed as a Prometheus scrape endpoint on :8889
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+        namespace: otelcol
+        send_timestamps: true
+        metric_expiration: 3m
+
+      # Logs -> Loki
+      loki:
+        endpoint: "http://loki:3100/loki/api/v1/push"
+        default_labels_enabled:
+          exporter: false
+          job: true
+
+      # Debug exporter writes a summary to collector stdout.
+      # Remove or set verbosity to "basic" in production.
+      debug:
+        verbosity: basic
+
+    service:
+      pipelines:
+        traces:
+          receivers:  [otlp]
+          processors: [memory_limiter, batch]
+          exporters:  [otlp/tempo, debug]
+
+        metrics:
+          receivers:  [otlp]
+          processors: [memory_limiter, batch]
+          exporters:  [prometheus]
+
+        logs:
+          receivers:  [otlp]
+          processors: [memory_limiter, batch]
+          exporters:  [loki]
+
+      extensions: [health_check]
+
+      telemetry:
+        metrics:
+          address: "0.0.0.0:8888"

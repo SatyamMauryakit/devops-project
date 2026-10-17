@@ -1,0 +1,57 @@
+# agent/k8s/rbac.yaml
+#
+# RBAC for the AI diagnosis agent.
+#
+# Principle of least privilege:
+#   - Scoped to the "sentinel" namespace only (Role, not ClusterRole).
+#   - Only the resources the executor needs: deployments (for remediation)
+#     and configmaps (for the kill switch).
+#   - No cluster-admin. No access to secrets at the cluster level.
+#   - No exec, no port-forward, no delete.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devops-sentinel-agent
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: devops-sentinel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: devops-sentinel-agent
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: devops-sentinel
+rules:
+  # Deployments: get (read state), patch (restart, scale, rollback), update.
+  # list is needed by client-go's informer cache used internally.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+
+  # ConfigMaps: get only — to read the kill switch value.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["agent-config"]   # limit to the specific ConfigMap
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devops-sentinel-agent
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: devops-sentinel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: devops-sentinel-agent
+subjects:
+  - kind: ServiceAccount
+    name: devops-sentinel-agent
+    namespace: sentinel

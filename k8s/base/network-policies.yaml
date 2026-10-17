@@ -1,0 +1,480 @@
+# network-policies.yaml
+#
+# Default-deny all ingress and egress within the sentinel namespace,
+# then allow only the required traffic paths.
+#
+# Traffic map:
+#   ingress-nginx --> frontend:80
+#   ingress-nginx --> backend:3000
+#   ingress-nginx --> backend:3000  (/health)
+#   frontend      --> backend:3000  (nginx proxy)
+#   backend       --> mongo:27017
+#   backend       --> otelcol:4317  (OTLP traces)
+#   otelcol       --> tempo:4317    (traces)
+#   otelcol       --> loki:3100     (logs)
+#   otelcol       --> prometheus:8889 (metrics scrape endpoint exposed)
+#   prometheus    --> otelcol:8889  (scrape app metrics)
+#   prometheus    --> otelcol:8888  (scrape self metrics)
+#   alertmanager  --> agent:8081    (alert webhook)
+#   agent         --> temporal:7233 (Temporal gRPC)
+#   agent         --> mongo:27017   (audit log)
+#   agent         --> otelcol:4317  (traces)
+#   agent         --> backend:3000  (health check)
+#   agent         --> loki:3100     (evidence collection)
+#   agent         --> prometheus:9090 (evidence collection)
+#   promtail      --> loki:3100     (log shipping)
+#   grafana       --> prometheus:9090
+#   grafana       --> loki:3100
+#   grafana       --> tempo:3200
+#   notifier      --> internet (Slack, WhatsApp APIs)
+#   agent         --> internet (Slack, WhatsApp APIs, Groq, Ollama)
+#   All pods      --> kube-dns:53   (DNS resolution)
+
+---
+# Default deny: block all ingress and egress for every pod in sentinel.
+# The policies below punch specific holes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: sentinel
+spec:
+  podSelector: {}    # applies to all pods in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow all pods to reach kube-dns for name resolution.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: sentinel
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# Frontend: accept traffic from the ingress controller, egress to backend.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+      ports:
+        - port: 3000
+
+---
+# Backend: accept from frontend and ingress; egress to mongo and otelcol.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        # Agent polls /health for post-action health checks.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongo
+      ports:
+        - port: 27017
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otelcol
+      ports:
+        - port: 4317
+
+---
+# MongoDB: accept only from backend and agent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongo
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mongo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 27017
+
+---
+# OTel Collector: accept from backend, agent; egress to tempo, loki, prometheus.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otelcol
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: otelcol
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 4317
+        - port: 4318
+        - port: 8888
+        - port: 8889
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - port: 4317
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+
+---
+# Prometheus: accept from grafana; egress to otelcol scrape endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 9090
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otelcol
+      ports:
+        - port: 8888
+        - port: 8889
+    # Prometheus needs access to the kube API for pod service discovery.
+    - ports:
+        - port: 443
+        - port: 6443
+
+---
+# Loki: accept from otelcol, promtail, grafana, agent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otelcol
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: promtail
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 3100
+
+---
+# Tempo: accept from otelcol and grafana.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tempo
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tempo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otelcol
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - port: 4317
+        - port: 3200
+
+---
+# Grafana: accept from ingress; egress to prometheus, loki, tempo.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - port: 3200
+
+---
+# Alertmanager: egress to agent webhook only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alertmanager
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 9093
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - port: 8081
+
+---
+# Notifier: ingress from alertmanager; egress to internet (Slack, WhatsApp).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notifier
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: notifier
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - port: 8080
+  egress:
+    # Allow egress to internet (Slack, WhatsApp APIs).
+    # In production, restrict to known IP ranges or use an egress proxy.
+    - ports:
+        - port: 443
+
+---
+# Agent: ingress from alertmanager and ingress-nginx (approval webhooks);
+#        egress to temporal, mongo, otelcol, backend, loki, prometheus, internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8081
+  egress:
+    # Temporal gRPC
+    - ports:
+        - port: 7233
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongo
+      ports:
+        - port: 27017
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otelcol
+      ports:
+        - port: 4317
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: backend
+      ports:
+        - port: 3000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 9090
+    # Internet egress: Slack, WhatsApp, Groq, Ollama host.
+    - ports:
+        - port: 443
+        - port: 11434
+
+---
+# Promtail: egress to loki only (reads node logs via hostPath, no ingress needed).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: promtail
+  namespace: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: promtail
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+    # Promtail queries the kube API for pod metadata.
+    - ports:
+        - port: 443
+        - port: 6443

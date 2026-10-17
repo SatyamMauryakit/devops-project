@@ -1,0 +1,10 @@
+# terraform.tfvars.example
+# Copy to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored (see root .gitignore) — never commit it.
+
+aws_region           = "us-east-1"
+instance_type        = "t3.micro"
+allowed_ssh_cidr      = "YOUR_IP/32"           # e.g. 203.0.113.42/32 — get yours with: curl -s https://checkip.amazonaws.com
+github_repo_url      = "https://github.com/<your-username>/devops-sentinel.git"
+mongo_root_username  = "admin"
+mongo_root_password  = "GENERATE_WITH_openssl_rand_-base64_24"

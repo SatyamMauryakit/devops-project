@@ -1,0 +1,18 @@
+# Temporal dynamic configuration file.
+# This file is mounted into the Temporal container.
+# It sets the minimum workflow task timeout to 1 second so tests and demos
+# respond quickly. The default is 1 minute which is too long for development.
+#
+# Reference: https://github.com/temporalio/temporal/blob/main/service/config/dynamicconfig/development-cass.yaml
+
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+frontend.enableClientVersionCheck:
+  - value: false
+    constraints: {}
+
+history.defaultWorkflowTaskTimeout:
+  - value: "1s"
+    constraints: {}

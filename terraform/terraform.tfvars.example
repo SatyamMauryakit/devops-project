@@ -1,0 +1,51 @@
+# terraform/terraform.tfvars.example
+#
+# Copy this file to terraform.tfvars and edit the values.
+# Never commit terraform.tfvars — it is gitignored.
+#
+# Replace placeholder values (marked with <...>) before running terraform plan.
+
+# ---------------------------------------------------------------------------
+# Global
+# ---------------------------------------------------------------------------
+aws_region  = "us-east-1"
+project     = "devops-sentinel"
+environment = "dev"
+owner       = "platform-team"
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["us-east-1a", "us-east-1b"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
+
+# true  = one NAT GW (~$32/month) -- recommended for dev/demo
+# false = one NAT GW per AZ (~$64/month) -- required for production HA
+single_nat_gateway = true
+
+# ---------------------------------------------------------------------------
+# ECR
+# ---------------------------------------------------------------------------
+ecr_image_count = 10
+
+# ---------------------------------------------------------------------------
+# EKS
+# ---------------------------------------------------------------------------
+# Set to true only when you need the cluster running.
+# Destroy the cluster when the demo is over to stop the ~$107/month charge.
+eks_enabled            = false
+eks_cluster_version    = "1.30"
+eks_node_instance_type = "t3.medium"
+eks_node_desired_count = 2
+eks_node_min_count     = 1
+eks_node_max_count     = 4
+
+# ---------------------------------------------------------------------------
+# IAM / GitHub OIDC
+# ---------------------------------------------------------------------------
+# Replace with your actual GitHub organisation and repository name.
+ci_oidc_provider_url = "token.actions.githubusercontent.com"
+github_org           = "<your-github-org>"
+github_repo          = "devops-sentinel"

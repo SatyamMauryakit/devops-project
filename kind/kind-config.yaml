@@ -1,0 +1,33 @@
+# kind-config.yaml
+# Creates a single-node kind cluster with port mappings for the nginx
+# ingress controller (ports 80 and 443 on the host).
+#
+# The extraPortMappings block binds the host ports to the node so that
+# after the ingress controller is installed, the app is reachable at
+# http://localhost without any kubectl port-forward.
+#
+# One control-plane node is enough for local development.
+# Add worker nodes here if you need to test pod scheduling or affinity rules.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+nodes:
+  - role: control-plane
+    # These labels are required by the nginx ingress controller's
+    # nodeSelector so it schedules onto this node.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # HTTP traffic from the host reaches the ingress controller.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      # HTTPS - not used in Step 2 but reserved for future TLS termination.
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

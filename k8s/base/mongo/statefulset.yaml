@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: mongo
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  serviceName: mongo          # must match the Headless Service name
+  replicas: 1                 # single-node MongoDB for local dev
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mongo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mongo
+        app.kubernetes.io/part-of: devops-sentinel
+    spec:
+      # ---------------------------------------------------------------------------
+      # Security context for the Pod
+      # ---------------------------------------------------------------------------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # mongodb user in the official image
+        runAsGroup: 999
+        fsGroup: 999            # ensures the mounted volume is writable by the mongo user
+        seccompProfile:
+          type: RuntimeDefault
+
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: mongo
+          # Pinned digest-free tag. Update intentionally; never use "latest".
+          image: mongo:7.0.12
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 27017
+              name: mongo
+
+          # Credentials come from the Secret; never hardcoded.
+          envFrom:
+            - secretRef:
+                name: mongo-credentials
+
+          # ---------------------------------------------------------------------------
+          # Security context for the container
+          # readOnlyRootFilesystem cannot be set to true for MongoDB because it
+          # writes journal files to /data/db and temp files to /tmp.
+          # We set everything else that we can.
+          # ---------------------------------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: false   # MongoDB requires write access to /data/db
+
+          # ---------------------------------------------------------------------------
+          # Resource limits
+          # These are sized for local development. Increase for staging/production.
+          # ---------------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # ---------------------------------------------------------------------------
+          # Probes
+          # Liveness: kill and restart the container if MongoDB stops responding.
+          # Readiness: stop sending traffic until MongoDB is ready to accept connections.
+          # ---------------------------------------------------------------------------
+          livenessProbe:
+            exec:
+              command:
+                - mongosh
+                - "--quiet"
+                - "--eval"
+                - "db.adminCommand({ ping: 1 })"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - "--quiet"
+                - "--eval"
+                - "db.adminCommand({ ping: 1 })"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+
+  # ---------------------------------------------------------------------------
+  # VolumeClaimTemplates
+  # StatefulSet creates one PVC per replica. On pod restart the same PVC
+  # is reattached, so data survives pod deletion.
+  # ---------------------------------------------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-data
+        labels:
+          app.kubernetes.io/name: mongo
+          app.kubernetes.io/part-of: devops-sentinel
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

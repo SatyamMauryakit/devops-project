@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  promtail.yaml: |
+    # Promtail agent configuration.
+    # Tails container logs from the node filesystem and ships them to Loki.
+    # Pod metadata (namespace, pod name, container name, app label) is added
+    # as Loki labels so logs can be filtered in Grafana.
+
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+      log_level: warn
+
+    positions:
+      # Stores the last-read position for each log file so Promtail does
+      # not re-send logs after a restart. Requires a writable volume.
+      filename: /run/promtail/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+
+        # Drop pods that are not running.
+        pipeline_stages:
+          # Parse the raw log line as JSON. Our backend emits structured JSON.
+          # If parsing fails (e.g. nginx plain-text logs) the raw line is kept.
+          - json:
+              expressions:
+                level:     level
+                trace_id:  trace_id
+                span_id:   span_id
+                message:   message
+
+          # Promote trace_id and span_id from the parsed JSON into Loki labels.
+          # This is what allows Grafana to draw a "Logs -> Traces" link.
+          - labels:
+              level:
+              trace_id:
+              span_id:
+
+        relabel_configs:
+          # Only scrape pods in the sentinel namespace.
+          - source_labels: [__meta_kubernetes_namespace]
+            action: keep
+            regex: sentinel
+
+          # Drop pods without a running status.
+          - source_labels: [__meta_kubernetes_pod_phase]
+            action: drop
+            regex: (Pending|Succeeded|Failed|Completed|Unknown)
+
+          # Set the job label from the app.kubernetes.io/name label.
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: replace
+            target_label: app
+
+          # Standard labels for every log stream.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+
+          # Build the log file path on the node filesystem.
+          - replacement: /var/log/pods/*$1/*.log
+            separator: /
+            source_labels:
+              - __meta_kubernetes_pod_uid
+              - __meta_kubernetes_pod_container_name
+            target_label: __path__

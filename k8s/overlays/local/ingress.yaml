@@ -1,0 +1,46 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sentinel
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/part-of: devops-sentinel
+  annotations:
+    # Tell the nginx ingress controller to handle this Ingress resource.
+    kubernetes.io/ingress.class: "nginx"
+    # Rewrite /api/items -> /api/items (no path rewrite needed here).
+    # nginx.ingress.kubernetes.io/rewrite-target is intentionally omitted
+    # because the backend already expects the /api prefix.
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+spec:
+  rules:
+    - host: localhost
+      http:
+        paths:
+          # Route /api/* to the backend service.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 3000
+          # Route /health to the backend service so the endpoint is
+          # reachable from outside the cluster for smoke tests.
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 3000
+          # Route everything else to the frontend (React SPA).
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent
+        app.kubernetes.io/part-of: devops-sentinel
+    spec:
+      serviceAccountName: devops-sentinel-agent
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532       # distroless/static:nonroot UID
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      terminationGracePeriodSeconds: 40
+
+      containers:
+        - name: agent
+          image: devops-sentinel-agent:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8081
+
+          env:
+            - name: PORT
+              value: "8081"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: TEMPORAL_ADDR
+              value: "temporal:7233"
+            - name: TEMPORAL_NAMESPACE
+              value: "default"
+            - name: TEMPORAL_TASK_QUEUE
+              value: "sentinel-incidents"
+            - name: LOKI_URL
+              value: "http://loki:3100"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus:9090"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "devops-sentinel-agent"
+            # Switch to "groq" and set GROQ_API_KEY secret to use Groq instead.
+            - name: LLM_PROVIDER
+              value: "ollama"
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+            - name: OLLAMA_MODEL
+              value: "llama3.1:8b"
+            # GROQ_API_KEY is injected from the Secret when LLM_PROVIDER=groq.
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: GROQ_API_KEY
+                  optional: true
+            # Step 9: approval webhook secrets.
+            # Add SLACK_SIGNING_SECRET and WHATSAPP_APP_SECRET to agent-secrets:
+            #   kubectl create secret generic agent-secrets -n sentinel \
+            #     --from-literal=SLACK_SIGNING_SECRET="..." \
+            #     --from-literal=WHATSAPP_APP_SECRET="..." \
+            #     --dry-run=client -o yaml | kubectl apply -f -
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: SLACK_SIGNING_SECRET
+                  optional: true
+            - name: WHATSAPP_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: WHATSAPP_APP_SECRET
+                  optional: true
+            - name: WHATSAPP_VERIFY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: WHATSAPP_VERIFY_TOKEN
+                  optional: true
+            - name: MONGO_URI
+              value: "mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@mongo:27017/sentinel?authSource=admin"
+            - name: MONGO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-credentials
+                  key: MONGO_INITDB_ROOT_USERNAME
+                  optional: true
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-credentials
+                  key: MONGO_INITDB_ROOT_PASSWORD
+                  optional: true
+            - name: BACKEND_HEALTH_URL
+              value: "http://backend:3000/health"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3

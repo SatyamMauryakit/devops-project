@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/part-of: devops-sentinel
+    spec:
+      # ---------------------------------------------------------------------------
+      # Security context for the Pod
+      # nginx:alpine worker processes run as user "nginx" (uid 101).
+      # ---------------------------------------------------------------------------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101           # nginx user in nginx:alpine
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: frontend
+          image: devops-project-1-frontend:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 80
+              name: http
+
+          # ---------------------------------------------------------------------------
+          # Security context for the container
+          # nginx requires writable directories for its cache, pid, and tmp files.
+          # We set readOnlyRootFilesystem: true and mount emptyDir volumes at the
+          # specific paths nginx needs to write, so the rest of the filesystem
+          # remains read-only.
+          # ---------------------------------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: nginx-tmp
+              mountPath: /tmp
+
+          # ---------------------------------------------------------------------------
+          # Resource limits
+          # nginx is very lightweight; these are intentionally small.
+          # ---------------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}

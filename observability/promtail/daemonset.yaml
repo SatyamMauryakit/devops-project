@@ -1,0 +1,159 @@
+# ServiceAccount, ClusterRole, ClusterRoleBinding, and DaemonSet
+# for Promtail in a single file, separated by ---.
+#
+# Why ClusterRole and not Role?
+# Promtail's Kubernetes service discovery queries the API server for pod
+# metadata across all namespaces so it can enrich log lines with pod labels.
+# A namespaced Role cannot grant access to cluster-scoped list/watch on pods.
+# The permissions are read-only (get, list, watch) — no write access.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devops-sentinel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: promtail
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devops-sentinel
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: promtail
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devops-sentinel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: promtail
+subjects:
+  - kind: ServiceAccount
+    name: promtail
+    namespace: sentinel
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: promtail
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: promtail
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: promtail
+        app.kubernetes.io/part-of: devops-sentinel
+    spec:
+      serviceAccountName: promtail
+
+      # Promtail needs to read files from the host node's /var/log/pods path.
+      # hostPID and privileged are NOT required; hostPath volume mounts are enough.
+      securityContext:
+        runAsNonRoot: true
+        # grafana/promtail image uses uid 473.
+        runAsUser: 473
+        runAsGroup: 473
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Tolerate all taints so Promtail runs on every node including the
+      # control-plane node in a single-node kind cluster.
+      tolerations:
+        - operator: Exists
+
+      containers:
+        - name: promtail
+          image: grafana/promtail:3.1.0
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - "-config.file=/etc/promtail/promtail.yaml"
+
+          ports:
+            - name: http
+              containerPort: 9080
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is false because Promtail writes the
+            # positions file to /run/promtail (emptyDir below).
+            readOnlyRootFilesystem: false
+
+          env:
+            # Inject the node name so it can be used in log labels if needed.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/promtail
+              readOnly: true
+            # Read container logs from the node filesystem.
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            # Writable volume for the positions file.
+            - name: positions
+              mountPath: /run/promtail
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 9080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+
+      volumes:
+        - name: config
+          configMap:
+            name: promtail-config
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: positions
+          emptyDir: {}

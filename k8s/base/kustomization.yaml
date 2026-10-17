@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Common labels applied to every resource this Kustomization manages.
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - namespace.yaml
+  - mongo/secret.yaml
+  - mongo/statefulset.yaml
+  - mongo/service.yaml
+  - backend/configmap.yaml
+  - backend/deployment.yaml
+  - backend/service.yaml
+  - backend/hpa.yaml
+  - backend/pdb.yaml
+  - frontend/deployment.yaml
+  - frontend/service.yaml
+  - notifier/secret.yaml
+  - notifier/deployment.yaml
+  - notifier/service.yaml
+  # AI diagnosis agent (Step 8)
+  - ../../agent/k8s/secret.yaml
+  - ../../agent/k8s/deployment.yaml
+  - ../../agent/k8s/service.yaml
+  # Agent RBAC and kill switch (Step 9)
+  - ../../agent/k8s/rbac.yaml
+  - ../../agent/k8s/configmap-killswitch.yaml

@@ -1,0 +1,290 @@
+name: CI
+
+# Trigger on every push and pull request to any branch.
+# The push-to-registry job is gated on branch=main separately below.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+# Minimal permissions by default; individual jobs expand what they need.
+permissions:
+  contents: read
+
+env:
+  BACKEND_IMAGE:  ghcr.io/${{ github.repository_owner }}/devops-sentinel-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/devops-sentinel-frontend
+  NOTIFIER_IMAGE: ghcr.io/${{ github.repository_owner }}/devops-sentinel-notifier
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: build-backend
+  # ---------------------------------------------------------------------------
+  build-backend:
+    name: Build backend image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push on main) backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ env.BACKEND_IMAGE }}:${{ steps.tags.outputs.sha_tag }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  # ---------------------------------------------------------------------------
+  # Job 2: build-frontend
+  # ---------------------------------------------------------------------------
+  build-frontend:
+    name: Build frontend image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push on main) frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.tags.outputs.sha_tag }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  # ---------------------------------------------------------------------------
+  # Job 3: build-notifier
+  # Builds the Go notifier service image.
+  # ---------------------------------------------------------------------------
+  build-notifier:
+    name: Build notifier image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push on main) notifier image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./notifier
+          file: ./notifier/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+          tags: |
+            ${{ env.NOTIFIER_IMAGE }}:latest
+            ${{ env.NOTIFIER_IMAGE }}:${{ steps.tags.outputs.sha_tag }}
+          cache-from: type=gha,scope=notifier
+          cache-to: type=gha,mode=max,scope=notifier
+
+  # ---------------------------------------------------------------------------
+  # Job 4: notify
+  # Sends a Slack notification after all build jobs complete.
+  #
+  # Runs on every push to main only (not on PRs, not on other branches).
+  # Uses slackapi/slack-github-action which posts a Block Kit message via
+  # the incoming webhook stored in the SLACK_WEBHOOK_URL repository secret.
+  #
+  # Required GitHub repository secret:
+  #   SLACK_WEBHOOK_URL  — Incoming webhook URL from your Slack App settings.
+  #                        Add at: Settings > Secrets and variables > Actions
+  #
+  # The job always runs (even when builds fail) so failures are also reported.
+  # The "if: always()" on the step level controls the message content.
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify Slack
+    runs-on: ubuntu-24.04
+    needs: [build-backend, build-frontend, build-notifier]
+    # Always run this job (even when build jobs fail) but only on push to main.
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Compute short SHA
+        id: meta
+        run: |
+          echo "sha=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      # Notify on success: all three build jobs passed.
+      - name: Slack — pipeline success
+        if: >-
+          needs.build-backend.result == 'success' &&
+          needs.build-frontend.result == 'success' &&
+          needs.build-notifier.result == 'success'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "✅ Pipeline passed — devops-sentinel" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
+                    { "type": "mrkdwn", "text": "*Commit:*\n`${{ steps.meta.outputs.sha }}`" },
+                    { "type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}" },
+                    { "type": "mrkdwn", "text": "*Run:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View details>" }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      # Notify on failure: at least one build job failed.
+      - name: Slack — pipeline failure
+        if: >-
+          needs.build-backend.result == 'failure' ||
+          needs.build-frontend.result == 'failure' ||
+          needs.build-notifier.result == 'failure'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "🚨 Pipeline FAILED — devops-sentinel" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
+                    { "type": "mrkdwn", "text": "*Commit:*\n`${{ steps.meta.outputs.sha }}`" },
+                    { "type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}" },
+                    { "type": "mrkdwn", "text": "*Run:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View details>" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Job results:*\nbackend: `${{ needs.build-backend.result }}`  frontend: `${{ needs.build-frontend.result }}`  notifier: `${{ needs.build-notifier.result }}`"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # ---------------------------------------------------------------------------
+  # Job 5: deploy
+  # SSHes into the EC2 instance (provisioned by terraform/ec2), pulls the
+  # latest commit, and rebuilds the stack in place. Runs only on push to
+  # main, and only once all three build jobs succeeded.
+  #
+  # Required GitHub repository secrets (see terraform/ec2/README.md):
+  #   EC2_HOST     - public IP of the EC2 instance (terraform output public_ip)
+  #   EC2_USER     - SSH user, "ec2-user" for Amazon Linux
+  #   EC2_SSH_KEY  - private half of the Terraform-generated key pair
+  #
+  # If these secrets are not set yet, this job fails safely without
+  # affecting the build jobs above — deploy manually over SSH until you're
+  # ready to turn on automated CD.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-24.04
+    needs: [build-backend, build-frontend, build-notifier]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /opt/devops-sentinel
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up -d --build
+            docker image prune -f

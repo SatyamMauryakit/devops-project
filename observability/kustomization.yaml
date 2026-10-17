@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # OTel Collector
+  - otelcol/configmap.yaml
+  - otelcol/deployment.yaml
+  - otelcol/service.yaml
+  # Prometheus
+  - prometheus/clusterrole.yaml
+  - prometheus/configmap.yaml
+  - prometheus/deployment.yaml
+  - prometheus/service.yaml
+  # Loki
+  - loki/configmap.yaml
+  - loki/deployment.yaml
+  - loki/service.yaml
+  # Promtail
+  - promtail/configmap.yaml
+  - promtail/daemonset.yaml
+  # Tempo
+  - tempo/configmap.yaml
+  - tempo/deployment.yaml
+  - tempo/service.yaml
+  # Grafana
+  - grafana/datasources-configmap.yaml
+  - grafana/dashboard-configmap.yaml
+  - grafana/deployment.yaml
+  - grafana/service.yaml
+  # Prometheus alert rules (Step 6)
+  - prometheus-rules/configmap.yaml
+  # Alertmanager (Step 6)
+  - alertmanager/configmap.yaml
+  - alertmanager/deployment.yaml
+  - alertmanager/service.yaml

@@ -1,0 +1,83 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Inherit everything from the base and add local-specific resources.
+resources:
+  - ../../base
+  - ingress.yaml
+  # Observability stack: OTel Collector, Prometheus, Loki, Promtail, Tempo, Grafana.
+  - ../../../observability
+
+# The local overlay pins images to the locally built tags so Kubernetes
+# pulls from the kind node cache (loaded by setup.sh) rather than a registry.
+# "newTag: latest" combined with imagePullPolicy: IfNotPresent in the base
+# means kind uses the image already loaded into the node.
+images:
+  - name: devops-project-1-backend
+    newTag: latest
+  - name: devops-project-1-frontend
+    newTag: latest
+  - name: devops-sentinel-notifier
+    newTag: latest
+  - name: devops-sentinel-agent
+    newTag: latest
+
+# Patch the backend and frontend Deployments to set imagePullPolicy: Never.
+# "Never" tells Kubernetes to only use images already present on the node
+# and never try to pull from a registry. This is correct for kind because
+# the images are loaded via "kind load docker-image" and no registry exists.
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: backend
+        namespace: sentinel
+      spec:
+        template:
+          spec:
+            containers:
+              - name: backend
+                imagePullPolicy: Never
+                env:
+                  # Point the OTel SDK at the collector running in the same namespace.
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: "http://otelcol:4317"
+                  - name: OTEL_SERVICE_NAME
+                    value: "devops-sentinel-backend"
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+        namespace: sentinel
+      spec:
+        template:
+          spec:
+            containers:
+              - name: frontend
+                imagePullPolicy: Never
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: notifier
+        namespace: sentinel
+      spec:
+        template:
+          spec:
+            containers:
+              - name: notifier
+                imagePullPolicy: Never
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: agent
+        namespace: sentinel
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                imagePullPolicy: Never

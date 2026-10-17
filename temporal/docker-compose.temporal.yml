@@ -1,0 +1,109 @@
+# docker-compose.temporal.yml
+#
+# WHY THIS IS A SEPARATE COMPOSE FILE
+# -------------------------------------
+# The Temporal server is infrastructure, not the application. Keeping it in a
+# separate file means:
+#
+#   1. "docker compose down" on the app stack (docker-compose.yml) does not
+#      destroy workflow history. A workflow can survive an app restart.
+#
+#   2. The Temporal Postgres database is isolated from the application MongoDB.
+#      Different credentials, different lifecycle, different backup policy.
+#
+#   3. Temporal can be started once and left running across multiple app restarts
+#      during development without losing in-flight workflow state.
+#
+# USAGE
+# ------
+#   cd temporal
+#   cp .env.example .env            # fill in a real POSTGRES_PASSWORD
+#   docker compose -f docker-compose.temporal.yml up -d
+#
+#   # Start the worker (in a separate terminal):
+#   cd temporal/worker
+#   go run . -loki-url http://localhost:3100 -prometheus-url http://localhost:9090
+#
+# To stop without losing state:
+#   docker compose -f docker-compose.temporal.yml stop
+#
+# To destroy everything including history:
+#   docker compose -f docker-compose.temporal.yml down -v
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — persistence layer for Temporal
+  # ---------------------------------------------------------------------------
+  temporal-postgres:
+    image: postgres:16.3-alpine3.19
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Temporal server (auto-setup image)
+  # The auto-setup image creates the Temporal schema in Postgres on first boot.
+  # It exposes the gRPC frontend on port 7233 and the HTTP API on port 7243.
+  # ---------------------------------------------------------------------------
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    restart: unless-stopped
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      # Persistence configuration — tells Temporal where its database lives.
+      DB:                    postgresql
+      DB_PORT:               5432
+      POSTGRES_SEEDS:        temporal-postgres
+      POSTGRES_USER:         ${POSTGRES_USER}
+      POSTGRES_PWD:          ${POSTGRES_PASSWORD}
+      TEMPORAL_ADDRESS:      temporal:7233
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig.yaml
+      ENABLE_ES:             false   # No Elasticsearch; use built-in Postgres visibility
+    ports:
+      - "7233:7233"   # gRPC frontend — workers and CLI connect here
+      - "7243:7243"   # HTTP API — used by the Web UI and REST clients
+    volumes:
+      - ./dynamicconfig.yaml:/etc/temporal/dynamicconfig.yaml:ro
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Temporal Web UI
+  # A browser-based interface for monitoring workflows, activities, and workers.
+  # Access at: http://localhost:8088
+  # ---------------------------------------------------------------------------
+  temporal-ui:
+    image: temporalio/ui:2.28.0
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS:         temporal:7233
+      TEMPORAL_CORS_ORIGINS:    http://localhost:8088
+      TEMPORAL_UI_PORT:         8088
+    ports:
+      - "8088:8088"
+
+volumes:
+  temporal_postgres_data:
+    driver: local

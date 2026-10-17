@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  # This file tells Grafana where to find dashboard JSON files.
+  # The dashboards-json ConfigMap below is mounted at the same path.
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: sentinel
+        orgId: 1
+        type: file
+        disableDeletion: true
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-json
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  sentinel.json: |
+    {
+      "title": "DevOps Sentinel",
+      "uid": "devops-sentinel",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+
+        {
+          "id": 1,
+          "title": "Request Rate (req/s)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(otelcol_http_server_request_duration_seconds_count{job=\"otelcol-app\"}[1m]))",
+              "legendFormat": "req/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } }
+          }
+        },
+
+        {
+          "id": 2,
+          "title": "Error Rate (5xx %)",
+          "type": "timeseries",
+          "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(otelcol_http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[1m])) / sum(rate(otelcol_http_server_request_duration_seconds_count[1m]))",
+              "legendFormat": "error %"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "color": { "mode": "fixed", "fixedColor": "red" } }
+          }
+        },
+
+        {
+          "id": 3,
+          "title": "Latency p95 (ms)",
+          "type": "timeseries",
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(otelcol_http_server_request_duration_seconds_bucket{job=\"otelcol-app\"}[5m])) by (le)) * 1000",
+              "legendFormat": "p95 ms"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } }
+          }
+        },
+
+        {
+          "id": 4,
+          "title": "Pod CPU Usage",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"sentinel\", container!=\"\", container!=\"POD\"}[2m])) by (pod)",
+              "legendFormat": "{{ pod }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "cores", "color": { "mode": "palette-classic" } }
+          }
+        },
+
+        {
+          "id": 5,
+          "title": "Pod Memory Usage",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"sentinel\", container!=\"\", container!=\"POD\"}) by (pod)",
+              "legendFormat": "{{ pod }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } }
+          }
+        },
+
+        {
+          "id": 6,
+          "title": "Recent Error Logs",
+          "type": "logs",
+          "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{namespace=\"sentinel\", level=\"error\"}",
+              "legendFormat": ""
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending"
+          }
+        }
+
+      ]
+    }

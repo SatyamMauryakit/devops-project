@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifier
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: notifier
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: notifier
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

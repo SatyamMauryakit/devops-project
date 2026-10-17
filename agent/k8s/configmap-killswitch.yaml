@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: agent
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  # Kill switch for automated remediation.
+  # Set to "false" to block all remediation immediately without restarting the agent.
+  #
+  # To disable:
+  #   kubectl patch configmap agent-config -n sentinel \
+  #     --type merge -p '{"data":{"remediation.enabled":"false"}}'
+  #
+  # To re-enable:
+  #   kubectl patch configmap agent-config -n sentinel \
+  #     --type merge -p '{"data":{"remediation.enabled":"true"}}'
+  remediation.enabled: "true"

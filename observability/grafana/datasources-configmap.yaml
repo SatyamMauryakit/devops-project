@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  datasources.yaml: |
+    # Grafana provisioned datasources.
+    # Grafana reads this file at startup; no manual UI configuration needed.
+    # All three datasources are linked so Grafana can jump from a log line
+    # to its trace (Loki -> Tempo) and from a metric to exemplars (Prometheus -> Tempo).
+
+    apiVersion: 1
+
+    datasources:
+
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        url: http://prometheus:9090
+        access: proxy
+        isDefault: true
+        editable: false
+        jsonData:
+          httpMethod: POST
+          exemplarTraceIdDestinations:
+            - name: trace_id
+              datasourceUid: tempo
+
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki:3100
+        access: proxy
+        editable: false
+        jsonData:
+          # When Grafana sees a trace_id label on a Loki log line it renders
+          # a button that jumps to that trace in Tempo.
+          derivedFields:
+            - matcherRegex: '"trace_id":"([a-f0-9]{32})"'
+              name: trace_id
+              url: "$${__value.raw}"
+              datasourceUid: tempo
+              urlDisplayLabel: "View trace in Tempo"
+
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        url: http://tempo:3200
+        access: proxy
+        editable: false
+        jsonData:
+          httpMethod: GET
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: "-1m"
+            spanEndTimeShift: "1m"
+            filterByTraceID: true
+            filterBySpanID: false
+            customQuery: false
+          tracesToMetrics:
+            datasourceUid: prometheus
+            spanStartTimeShift: "-1m"
+            spanEndTimeShift: "1m"
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true
+          search:
+            hide: false
+          lokiSearch:
+            datasourceUid: loki

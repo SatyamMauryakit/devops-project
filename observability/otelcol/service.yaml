@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: otelcol
+    app.kubernetes.io/part-of: devops-sentinel
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: otelcol
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+    # Prometheus scrapes this port for application metrics forwarded by the collector.
+    - name: metrics-app
+      port: 8889
+      targetPort: 8889
+      protocol: TCP
+    # Prometheus scrapes this port for the collector's own internal metrics.
+    - name: metrics-self
+      port: 8888
+      targetPort: 8888
+      protocol: TCP

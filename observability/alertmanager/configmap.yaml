@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  alertmanager.yml: |
+    # Alertmanager configuration.
+    #
+    # Routing:
+    #   All alerts -> AI agent webhook (Step 8).
+    #   The agent collects evidence, runs LLM diagnosis, and starts a
+    #   Temporal IncidentWorkflow. The workflow notifies Slack/WhatsApp.
+    #   The notifier service (Step 6) is the fallback receiver.
+    #
+    # The agent listens on http://agent:8081/webhook.
+
+    global:
+      # How long to wait before re-sending a resolved notification.
+      resolve_timeout: 5m
+
+    route:
+      # All alerts that do not match a child route land here.
+      receiver: notifier-webhook
+      group_by: ["alertname", "severity"]
+      # Wait this long to batch alerts with the same group_by labels.
+      group_wait: 30s
+      # Wait this long before sending a new notification for a group that
+      # has already been notified.
+      group_interval: 5m
+      # Wait this long before re-sending a notification for an alert that
+      # is still firing.
+      repeat_interval: 15m
+
+      routes:
+        # Critical alerts are re-notified more aggressively.
+        - matchers:
+            - severity = "critical"
+          receiver: notifier-webhook
+          repeat_interval: 5m
+
+        # Resolved alerts always go to the same receiver.
+        - matchers:
+            - alertname =~ ".*"
+          receiver: notifier-webhook
+
+    receivers:
+      - name: notifier-webhook
+        webhook_configs:
+          - url: "http://agent:8081/webhook"
+            send_resolved: true
+            http_config:
+              follow_redirects: true
+
+    # Inhibition rules prevent low-severity alerts from firing when a
+    # higher-severity alert for the same target is already active.
+    # This stops a flood of HighLatencyP95 warnings when BackendDown is firing.
+    inhibit_rules:
+      - source_matchers:
+          - severity = "critical"
+        target_matchers:
+          - severity = "warning"
+        # Only inhibit when the alerts share the same deployment/service label.
+        equal: ["alertname"]

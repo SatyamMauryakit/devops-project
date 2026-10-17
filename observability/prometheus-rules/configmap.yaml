@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: sentinel
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: devops-sentinel
+data:
+  sentinel.rules.yaml: |
+    groups:
+      - name: sentinel.backend
+        # Evaluate every 30 seconds. Keep the interval short so alerts fire
+        # quickly in a demo without waiting minutes for data to accumulate.
+        interval: 30s
+        rules:
+
+          # -------------------------------------------------------------------
+          # 1. High error rate
+          # Fires when more than 5 % of HTTP responses in the last 2 minutes
+          # are 5xx errors. Threshold is intentionally low for demo purposes;
+          # raise to 1 % or use a multi-burn-rate SLO rule in production.
+          # -------------------------------------------------------------------
+          - alert: HighErrorRate
+            expr: |
+              (
+                sum(rate(otelcol_http_server_request_duration_seconds_count{
+                  job="otelcol-app",
+                  http_response_status_code=~"5.."
+                }[2m]))
+                /
+                sum(rate(otelcol_http_server_request_duration_seconds_count{
+                  job="otelcol-app"
+                }[2m]))
+              ) > 0.05
+            for: 1m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "High 5xx error rate on backend"
+              description: >-
+                More than 5 % of backend HTTP requests are returning 5xx errors.
+                Current rate: {{ $value | humanizePercentage }}.
+                Check backend logs: kubectl logs -n sentinel deployment/backend
+
+          # -------------------------------------------------------------------
+          # 2. High latency (p95 > 1 second)
+          # Uses the histogram exported by the OTel Collector.
+          # -------------------------------------------------------------------
+          - alert: HighLatencyP95
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum(rate(otelcol_http_server_request_duration_seconds_bucket{
+                  job="otelcol-app"
+                }[5m])) by (le)
+              ) > 1.0
+            for: 2m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "High p95 latency on backend"
+              description: >-
+                The 95th percentile response time has exceeded 1 second for
+                more than 2 minutes. Current p95: {{ $value | humanizeDuration }}.
+
+          # -------------------------------------------------------------------
+          # 3. Pod crash loop
+          # Fires when a pod has restarted more than 3 times in 15 minutes.
+          # Uses kube_pod_container_status_restarts_total which is available
+          # when kube-state-metrics is running. Without it, use the
+          # container_restarts metric from the kubelet.
+          # -------------------------------------------------------------------
+          - alert: PodCrashLooping
+            expr: |
+              increase(
+                kube_pod_container_status_restarts_total{
+                  namespace="sentinel"
+                }[15m]
+              ) > 3
+            for: 0m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "Pod {{ $labels.pod }} is crash-looping"
+              description: >-
+                Container {{ $labels.container }} in pod {{ $labels.pod }}
+                has restarted {{ $value | humanize }} times in the last 15 minutes.
+                Check: kubectl describe pod -n sentinel {{ $labels.pod }}
+
+          # -------------------------------------------------------------------
+          # 4. Backend down (no healthy pods)
+          # Fires immediately when the backend health check returns non-200
+          # or when all backend pods become unready.
+          # Uses the probe_success metric from the blackbox exporter if
+          # available; falls back to kube_deployment_status_replicas_ready.
+          #
+          # This rule uses a simpler approach: check that the number of ready
+          # backend replicas is zero. This fires even when the OTel collector
+          # cannot scrape the backend (which would break the latency rules).
+          # -------------------------------------------------------------------
+          - alert: BackendDown
+            expr: |
+              kube_deployment_status_replicas_ready{
+                namespace="sentinel",
+                deployment="backend"
+              } == 0
+            for: 0m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "Backend deployment has zero ready replicas"
+              description: >-
+                All backend pods are unready. The application is unavailable.
+                Check: kubectl get pods -n sentinel -l app.kubernetes.io/name=backend
+
+          # -------------------------------------------------------------------
+          # 5. Backend health endpoint returning non-200
+          # A softer signal than BackendDown: fires when /health returns
+          # degraded (503) but at least one pod is still running.
+          # Uses the OTel HTTP metric for the /health path specifically.
+          # -------------------------------------------------------------------
+          - alert: BackendHealthDegraded
+            expr: |
+              sum(rate(otelcol_http_server_request_duration_seconds_count{
+                job="otelcol-app",
+                http_route="/health",
+                http_response_status_code="503"
+              }[2m])) > 0
+            for: 1m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "Backend /health endpoint returning 503"
+              description: >-
+                The backend /health endpoint is returning HTTP 503, indicating
+                that MongoDB is unreachable. The API is degraded.
+                Check: kubectl logs -n sentinel deployment/backend | grep '"level":"error"'
